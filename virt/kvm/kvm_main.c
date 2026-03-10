@@ -3901,9 +3901,6 @@ static bool kvm_vcpu_eligible_for_directed_yield(struct kvm_vcpu *vcpu)
 #ifdef CONFIG_HAVE_KVM_CPU_RELAX_INTERCEPT
 	bool eligible;
 
-	if (READ_ONCE(vcpu->preempted) && READ_ONCE(vcpu->mode) == IN_GUEST_MODE)
-		return true;
-
 	eligible = !vcpu->spin_loop.in_spin_loop ||
 		    vcpu->spin_loop.dy_eligible;
 
@@ -3964,9 +3961,9 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
 	int try;
 
 	nr_vcpus = atomic_read(&kvm->online_vcpus);
-	try = clamp(ilog2(nr_vcpus + 1), 3, 10);
 	if (nr_vcpus < 2)
 		return;
+	try = min(nr_vcpus - 1, 8);
 
 	/* Pairs with the smp_wmb() in kvm_vm_ioctl_create_vcpu(). */
 	smp_rmb();
@@ -4000,6 +3997,13 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
 
 		vcpu = xa_load(&kvm->vcpu_array, idx);
 		if (!READ_ONCE(vcpu->ready))
+			continue;
+		/*
+		 * kvm_vcpu_wake_up() can race with kvm_sched_in() and leave @ready
+		 * true for a running vCPU.  Filter out vCPUs that are not currently
+		 * scheduled out to avoid futile directed-yield attempts.
+		 */
+		if (!READ_ONCE(vcpu->scheduled_out))
 			continue;
 		if (READ_ONCE(vcpu->mode) == IN_GUEST_MODE)
 			continue;
