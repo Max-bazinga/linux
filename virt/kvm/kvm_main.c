@@ -454,7 +454,6 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 	kvm_vcpu_set_in_spin_loop(vcpu, false);
 	kvm_vcpu_set_dy_eligible(vcpu, false);
 	vcpu->preempted = false;
-	vcpu->ready = false;
 	preempt_notifier_init(&vcpu->preempt_notifier, &kvm_preempt_ops);
 	vcpu->last_used_slot = NULL;
 
@@ -3790,7 +3789,6 @@ EXPORT_SYMBOL_GPL(kvm_vcpu_halt);
 bool kvm_vcpu_wake_up(struct kvm_vcpu *vcpu)
 {
 	if (__kvm_vcpu_wake_up(vcpu)) {
-		WRITE_ONCE(vcpu->ready, true);
 		++vcpu->stat.generic.halt_wakeup;
 		return true;
 	}
@@ -3996,7 +3994,7 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
 			continue;
 
 		vcpu = xa_load(&kvm->vcpu_array, idx);
-		if (!READ_ONCE(vcpu->ready))
+		if (!kvm_vcpu_is_runnable_and_scheduled_out(vcpu))
 			continue;
 		/*
 		 * kvm_vcpu_wake_up() can race with kvm_sched_in() and leave @ready
@@ -6353,7 +6351,6 @@ static void kvm_sched_in(struct preempt_notifier *pn, int cpu)
 	struct kvm_vcpu *vcpu = preempt_notifier_to_vcpu(pn);
 
 	WRITE_ONCE(vcpu->preempted, false);
-	WRITE_ONCE(vcpu->ready, false);
 
 	__this_cpu_write(kvm_running_vcpu, vcpu);
 	kvm_arch_vcpu_load(vcpu, cpu);
@@ -6368,10 +6365,9 @@ static void kvm_sched_out(struct preempt_notifier *pn,
 
 	WRITE_ONCE(vcpu->scheduled_out, true);
 
-	if (task_is_runnable(current) && vcpu->wants_to_run) {
+	if (task_is_runnable(current) && vcpu->wants_to_run)
 		WRITE_ONCE(vcpu->preempted, true);
-		WRITE_ONCE(vcpu->ready, true);
-	}
+
 	kvm_arch_vcpu_put(vcpu);
 	__this_cpu_write(kvm_running_vcpu, NULL);
 }
