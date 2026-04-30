@@ -30,14 +30,6 @@
 #include "processor.h"
 #include "userfaultfd_util.h"
 
-/* EPT violation exit qualification bits (from arch/x86/include/asm/vmx.h) */
-#define EPT_VIOLATION_ACC_READ		BIT(0)
-#define EPT_VIOLATION_ACC_WRITE		BIT(1)
-#define EPT_VIOLATION_ACC_INSTR		BIT(2)
-#define EPT_VIOLATION_PROT_MASK		(BIT(3) | BIT(4) | BIT(5))
-#define EPT_VIOLATION_GVA_IS_VALID	BIT(7)
-#define EPT_VIOLATION_GVA_TRANSLATED	BIT(8)
-
 /* Test memory layout */
 #define TEST_DATA_SLOT		10
 #define TEST_CODE_SLOT		11
@@ -68,6 +60,7 @@
 #define TEST_FAST_PF_GVA	0x80000000ULL
 #define UCALL_SYNC_FAST_PF_DONE	8
 #define UCALL_SYNC_FAST_PF_BASELINE	9
+#define FAST_PF_ITERATIONS	4
 
 /*
  * Per-fault-type counters for verification.
@@ -252,38 +245,15 @@ static void guest_code_perm(void)
 	 * KVM then exits to userspace with KVM_EXIT_MMIO.
 	 *
 	 * The host MMIO handler writes the value into HVA memory.
-	 * After KVM re-enters, the guest re-executes the write, which
-	 * again causes MMIO exit (since the memslot is still RO from
-	 * KVM's perspective — KVM does not promote RO→RW).
-	 *
-	 * We use a single write that we expect to trigger MMIO,
-	 * then GUEST_SYNC to signal the host.
+	 * KVM completes the emulated MMIO write and advances RIP, so the
+	 * guest resumes at the following GUEST_SYNC.
 	 */
 	WRITE_ONCE(*perm_page, PERM_WRITE_TEST_QWORD);
-	/*
-	 * After the MMIO handler services the write, KVM re-enters
-	 * and the guest re-executes the WRITE_ONCE.  This causes
-	 * another MMIO exit.  This infinite loop is broken by the
-	 * host side which detects the second MMIO exit and advances
-	 * past the write by modifying the guest RIP via
-	 * vcpu_run_complete_io() or similar.  For x86, KVM
-	 * automatically advances RIP past the instruction on MMIO
-	 * exits, so the guest proceeds.
-	 */
 	GUEST_SYNC(UCALL_SYNC_PERM_WRITE_MMIO);
 
 	/*
-	 * Verify value was NOT written (since the MMIO handler wrote to
-	 * host memory but the EPT mapping remains RO, the guest cannot
-	 * observe the written value through the read-only EPT entry).
-	 *
-	 * Actually, on x86 EPT with RO memslot: after the MMIO exit,
-	 * KVM handles the write fault. Since the memslot is RO,
-	 * KVM does NOT re-enter the guest to retry the write instruction.
-	 * Instead KVM completes the MMIO and advances RIP, so the write
-	 * instruction is effectively executed by the MMIO handler writing
-	 * to HVA.  The guest *can* read the value back because the EPT
-	 * entry allows reads.
+	 * The guest can read the MMIO handler's value back because the
+	 * read-only memslot still permits reads from the backing HVA.
 	 */
 	val = READ_ONCE(*perm_page);
 	GUEST_ASSERT_EQ(val, PERM_WRITE_TEST_QWORD);
@@ -576,6 +546,8 @@ static void run_guest_perm(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 	TEST_ASSERT(run->mmio.is_write, "Expected write MMIO");
 	perm_mmio_handler(vm, run);
 
+	vcpu_run_complete_io(vcpu);
+	vcpu_run(vcpu);
 	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
 	TEST_ASSERT_EQ(uc.args[1], UCALL_SYNC_PERM_WRITE_MMIO);
 	TEST_ASSERT_EQ(stats_read(&stats.perm_mmio_exits), 1);
@@ -668,6 +640,7 @@ static void run_guest_misconfig(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 	stats_inc(&stats.misconfig_mmio_exits);
 
 	vcpu_run_complete_io(vcpu);
+	vcpu_run(vcpu);
 
 	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
 	TEST_ASSERT_EQ(uc.args[1], UCALL_SYNC_MISCONFIG_READ_DONE);
@@ -692,6 +665,7 @@ static void run_guest_misconfig(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 	stats_inc(&stats.misconfig_mmio_exits);
 
 	vcpu_run_complete_io(vcpu);
+	vcpu_run(vcpu);
 
 	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
 	TEST_ASSERT_EQ(uc.args[1], UCALL_SYNC_MISCONFIG_WRITE_DONE);
@@ -719,22 +693,14 @@ static void run_guest_misconfig(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 /*
  * Guest code: EPT fast_page_fault test.
  *
- * Tests the two fast_page_fault() scenarios:
- *   Scenario A - Access Tracking: When A/D bits are not available in EPT,
- *     KVM uses access tracking SPTEs to monitor page accesses.  The first
- *     write to an access-tracked page triggers EPT_VIOLATION (W=0 in the
- *     SPTE).  fast_page_fault() detects the access_track SPTE, restores the
- *     ACC_ALL permissions, and marks the page accessed — all without taking
- *     mmu_lock.
+ * Tests dirty-logging write-protect faults.  When dirty logging is enabled,
+ * KVM write-protects SPTEs.  The first write triggers EPT_VIOLATION, and
+ * fast_page_fault() makes the SPTE writable, marks the GFN dirty, and resumes
+ * the guest without taking mmu_lock.
  *
- *   Scenario B - Dirty Logging Write Protect: When dirty logging is enabled,
- *     KVM write-protects SPTEs.  The first write triggers EPT_VIOLATION.
- *     fast_page_fault() makes the SPTE writable, marks the GFN dirty,
- *     and continues — all without mmu_lock.
- *
- * The host orchestrates each scenario by:
+ * The host orchestrates the scenario by:
  *   1. Creating a RW memslot, touching the page to populate the SPTE.
- *   2. Enabling access tracking or dirty logging (write-protect the SPTE).
+ *   2. Enabling dirty logging to write-protect the SPTE.
  *   3. Letting the guest write → triggers EPT_VIOLATION → KVM should
  *      handle it via fast_page_fault().
  *
@@ -754,16 +720,13 @@ static void guest_code_fast_pf(void)
 	GUEST_SYNC(UCALL_SYNC_FAST_PF_BASELINE);
 
 	/*
-	 * After the host enables dirty logging / access tracking, the
-	 * SPTE becomes write-protected.  The next write should trigger
-	 * EPT_VIOLATION and KVM should fix it via fast_page_fault().
-	 *
-	 * The host does this in a loop: enable tracking, guest writes,
-	 * disable tracking, check stats.
+	 * After the host enables dirty logging, the SPTE becomes
+	 * write-protected.  The next write should trigger EPT_VIOLATION
+	 * and KVM should fix it via fast_page_fault().
 	 */
 	{
 		int i;
-		for (i = 0; i < 8; i++) {
+		for (i = 0; i < FAST_PF_ITERATIONS; i++) {
 			WRITE_ONCE(*page, 0xDEAD0000 + i);
 			GUEST_SYNC(UCALL_SYNC_FAST_PF_DONE);
 		}
@@ -815,8 +778,6 @@ static u64 vcpu_stat_get(struct kvm_vcpu *vcpu, const char *name)
  *   4. Read pf_fast counter to verify fast path was taken.
  *   5. Read dirty bitmap to verify GFN was marked dirty.
  */
-#define FAST_PF_ITERATIONS	4
-
 static void run_guest_fast_pf_dirty_log(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *run = vcpu->run;
@@ -941,6 +902,7 @@ int main(int argc, char *argv[])
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
 
+	TEST_REQUIRE(host_cpu_is_intel);
 	TEST_REQUIRE(kvm_is_tdp_enabled());
 	pr_info("ept_fault_test: start\n");
 
