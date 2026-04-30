@@ -301,18 +301,13 @@ static void guest_code_perm(void)
  */
 static void perm_mmio_handler(struct kvm_vm *vm, struct kvm_run *run)
 {
-	struct userspace_mem_region *region;
 	void *hva;
 
-	region = vm_get_mem_region(vm, TEST_PERM_SLOT);
-	TEST_ASSERT(region != NULL, "Failed to get perm memslot region");
-
-	TEST_ASSERT_EQ(run->mmio.phys_addr, region->region.guest_phys_addr);
+	TEST_ASSERT_EQ(run->mmio.phys_addr, TEST_PERM_GPA);
 	TEST_ASSERT(run->mmio.is_write, "Expected MMIO write to RO memslot");
 
-	hva = (void *)region->region.userspace_addr;
-	memcpy(hva + (run->mmio.phys_addr - region->region.guest_phys_addr),
-	       run->mmio.data, run->mmio.len);
+	hva = addr_gpa2hva(vm, run->mmio.phys_addr);
+	memcpy(hva, run->mmio.data, run->mmio.len);
 
 	stats_inc(&stats.perm_mmio_exits);
 }
@@ -323,12 +318,10 @@ static void perm_mmio_handler(struct kvm_vm *vm, struct kvm_run *run)
  */
 static void load_perm_exec_stub(struct kvm_vm *vm)
 {
-	struct userspace_mem_region *region;
 	void *hva;
 	static const uint8_t exec_stub[] = { 0xC3 }; /* ret */
 
-	region = vm_get_mem_region(vm, TEST_PERM_SLOT);
-	hva = (void *)region->region.userspace_addr;
+	hva = addr_gpa2hva(vm, TEST_PERM_GPA);
 	memcpy(hva + 0x100, exec_stub, sizeof(exec_stub));
 }
 
@@ -338,11 +331,9 @@ static void load_perm_exec_stub(struct kvm_vm *vm)
  */
 static void init_perm_data_page(struct kvm_vm *vm)
 {
-	struct userspace_mem_region *region;
 	uint64_t *hva;
 
-	region = vm_get_mem_region(vm, TEST_PERM_SLOT);
-	hva = (uint64_t *)region->region.userspace_addr;
+	hva = (uint64_t *)addr_gpa2hva(vm, TEST_PERM_GPA);
 	*hva = EXPECTED_DATA_QWORD;
 }
 
