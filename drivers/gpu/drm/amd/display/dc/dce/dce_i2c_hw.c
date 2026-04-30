@@ -69,6 +69,7 @@ static enum i2c_channel_operation_result get_channel_status(
 	struct dce_i2c_hw *dce_i2c_hw,
 	uint8_t *returned_bytes)
 {
+	(void)returned_bytes;
 	uint32_t i2c_sw_status = 0;
 	uint32_t value =
 		REG_GET(DC_I2C_SW_STATUS, DC_I2C_SW_STATUS, &i2c_sw_status);
@@ -591,7 +592,7 @@ static bool dce_i2c_hw_engine_submit_payload(struct dce_i2c_hw *dce_i2c_hw,
 			DCE_I2C_TRANSACTION_ACTION_I2C_WRITE;
 
 
-	request.address = (uint8_t) ((payload->address << 1) | !payload->write);
+	request.address = (uint8_t) ((payload->address << 1) | (payload->write ? 0 : 1));
 	request.length = payload->length;
 	request.data = payload->data;
 
@@ -631,6 +632,7 @@ bool dce_i2c_submit_command_hw(
 	struct i2c_command *cmd,
 	struct dce_i2c_hw *dce_i2c_hw)
 {
+	(void)ddc;
 	uint8_t index_of_payload = 0;
 	bool result;
 

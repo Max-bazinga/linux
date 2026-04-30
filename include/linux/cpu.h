@@ -83,6 +83,7 @@ extern ssize_t cpu_show_old_microcode(struct device *dev,
 extern ssize_t cpu_show_indirect_target_selection(struct device *dev,
 						  struct device_attribute *attr, char *buf);
 extern ssize_t cpu_show_tsa(struct device *dev, struct device_attribute *attr, char *buf);
+extern ssize_t cpu_show_vmscape(struct device *dev, struct device_attribute *attr, char *buf);
 
 extern __printf(4, 5)
 struct device *cpu_device_create(struct device *parent, void *drvdata,
@@ -227,5 +228,9 @@ static inline bool cpu_attack_vector_mitigated(enum cpu_attack_vectors v)
 }
 #define smt_mitigations SMT_MITIGATIONS_OFF
 #endif
+
+int arch_prctl_get_branch_landing_pad_state(struct task_struct *t, unsigned long __user *state);
+int arch_prctl_set_branch_landing_pad_state(struct task_struct *t, unsigned long state);
+int arch_prctl_lock_branch_landing_pad_state(struct task_struct *t);
 
 #endif /* _LINUX_CPU_H_ */

@@ -72,10 +72,15 @@ struct tk_read_base {
  * @id:				The timekeeper ID
  * @tkr_raw:			The readout base structure for CLOCK_MONOTONIC_RAW
  * @raw_sec:			CLOCK_MONOTONIC_RAW  time in seconds
+ * @cs_id:			The ID of the current clocksource
+ * @cs_ns_to_cyc_mult:		Multiplicator for nanoseconds to cycles conversion
+ * @cs_ns_to_cyc_shift:		Shift value for nanoseconds to cycles conversion
+ * @cs_ns_to_cyc_maxns:		Maximum nanoseconds to cyles conversion range
  * @clock_was_set_seq:		The sequence number of clock was set events
  * @cs_was_changed_seq:		The sequence number of clocksource change events
  * @clock_valid:		Indicator for valid clock
  * @monotonic_to_boot:		CLOCK_MONOTONIC to CLOCK_BOOTTIME offset
+ * @monotonic_to_aux:		CLOCK_MONOTONIC to CLOCK_AUX offset
  * @cycle_interval:		Number of clock cycles in one NTP interval
  * @xtime_interval:		Number of clock shifted nano seconds in one NTP
  *				interval.
@@ -117,6 +122,9 @@ struct tk_read_base {
  * @offs_aux is used by the auxiliary timekeepers which do not utilize any
  * of the regular timekeeper offset fields.
  *
+ * @monotonic_to_aux is a timespec64 representation of @offs_aux to
+ * accelerate the VDSO update for CLOCK_AUX.
+ *
  * The cacheline ordering of the structure is optimized for in kernel usage of
  * the ktime_get() and ktime_get_ts64() family of time accessors. Struct
  * timekeeper is prepended in the core timekeeping code with a sequence count,
@@ -155,11 +163,18 @@ struct timekeeper {
 	u64			raw_sec;
 
 	/* Cachline 3 and 4 (timekeeping internal variables): */
+	enum clocksource_ids	cs_id;
+	u32			cs_ns_to_cyc_mult;
+	u32			cs_ns_to_cyc_shift;
+	u64			cs_ns_to_cyc_maxns;
 	unsigned int		clock_was_set_seq;
 	u8			cs_was_changed_seq;
 	u8			clock_valid;
 
-	struct timespec64	monotonic_to_boot;
+	union {
+		struct timespec64	monotonic_to_boot;
+		struct timespec64	monotonic_to_aux;
+	};
 
 	u64			cycle_interval;
 	u64			xtime_interval;

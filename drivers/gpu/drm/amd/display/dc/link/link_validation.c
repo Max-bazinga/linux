@@ -391,6 +391,7 @@ static const struct dc_tunnel_settings *get_dp_tunnel_settings(const struct dc_s
  */
 enum dc_status link_validate_dp_tunnel_bandwidth(const struct dc *dc, const struct dc_state *new_ctx)
 {
+	(void)dc;
 	struct dc_validation_dpia_set dpia_link_sets[MAX_DPIA_NUM] = { 0 };
 	uint8_t link_count = 0;
 	enum dc_status result = DC_OK;
@@ -408,8 +409,10 @@ enum dc_status link_validate_dp_tunnel_bandwidth(const struct dc *dc, const stru
 		link = stream->link;
 
 		if (!(link && (stream->signal == SIGNAL_TYPE_DISPLAY_PORT
-				|| stream->signal == SIGNAL_TYPE_DISPLAY_PORT_MST)
-				&& link->hpd_status))
+				|| stream->signal == SIGNAL_TYPE_DISPLAY_PORT_MST)))
+			continue;
+
+		if ((link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA) && (link->hpd_status == false))
 			continue;
 
 		dp_tunnel_settings = get_dp_tunnel_settings(new_ctx, stream);

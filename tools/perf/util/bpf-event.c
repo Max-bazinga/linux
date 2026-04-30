@@ -349,7 +349,7 @@ static struct bpf_metadata *bpf_metadata_alloc(__u32 nr_prog_tags,
 	if (!metadata)
 		return NULL;
 
-	metadata->prog_names = zalloc(nr_prog_tags * sizeof(char *));
+	metadata->prog_names = calloc(nr_prog_tags, sizeof(char *));
 	if (!metadata->prog_names) {
 		bpf_metadata_free(metadata);
 		return NULL;
@@ -657,9 +657,15 @@ static int perf_event__synthesize_one_bpf_prog(struct perf_session *session,
 		info_node->info_linear = info_linear;
 		info_node->metadata = NULL;
 		if (!perf_env__insert_bpf_prog_info(env, info_node)) {
-			free(info_linear);
+			/*
+			 * Insert failed, likely because of a duplicate event
+			 * made by the sideband thread. Ignore synthesizing the
+			 * metadata.
+			 */
 			free(info_node);
+			goto out;
 		}
+		/* info_linear is now owned by info_node and shouldn't be freed below. */
 		info_linear = NULL;
 
 		/*
@@ -727,7 +733,8 @@ kallsyms_process_symbol(void *data, const char *_name,
 			char type __maybe_unused, u64 start)
 {
 	char disp[KSYM_NAME_LEN];
-	char *module, *name;
+	const char *module;
+	char *name;
 	unsigned long id;
 	int err = 0;
 
@@ -781,11 +788,10 @@ int perf_event__synthesize_bpf_events(struct perf_session *session,
 				err = 0;
 				break;
 			}
-			pr_debug("%s: can't get next program: %s%s\n",
-				 __func__, strerror(errno),
-				 errno == EINVAL ? " -- kernel too old?" : "");
 			/* don't report error on old kernel or EPERM  */
 			err = (errno == EINVAL || errno == EPERM) ? 0 : -1;
+			pr_debug("%s: can\'t get next program: %m%s\n",
+				__func__, errno == EINVAL ? " -- kernel too old?" : "");
 			break;
 		}
 		fd = bpf_prog_get_fd_by_id(id);
@@ -818,27 +824,25 @@ int perf_event__synthesize_bpf_events(struct perf_session *session,
 		.tool    = session->tool,
 	};
 
-	if (kallsyms__parse(kallsyms_filename, &arg, kallsyms_process_symbol)) {
-		pr_err("%s: failed to synthesize bpf images: %s\n",
-		       __func__, strerror(errno));
-	}
+	if (kallsyms__parse(kallsyms_filename, &arg, kallsyms_process_symbol))
+		pr_err("%s: failed to synthesize bpf images: %m\n", __func__);
 
 	free(event);
 	return err;
 }
 
-static void perf_env__add_bpf_info(struct perf_env *env, u32 id)
+static int perf_env__add_bpf_info(struct perf_env *env, u32 id)
 {
 	struct bpf_prog_info_node *info_node;
 	struct perf_bpil *info_linear;
 	struct btf *btf = NULL;
 	u64 arrays;
 	u32 btf_id;
-	int fd;
+	int fd, err = 0;
 
 	fd = bpf_prog_get_fd_by_id(id);
 	if (fd < 0)
-		return;
+		return -EINVAL;
 
 	arrays = 1UL << PERF_BPIL_JITED_KSYMS;
 	arrays |= 1UL << PERF_BPIL_JITED_FUNC_LENS;
@@ -852,6 +856,7 @@ static void perf_env__add_bpf_info(struct perf_env *env, u32 id)
 	info_linear = get_bpf_prog_info_linear(fd, arrays);
 	if (IS_ERR_OR_NULL(info_linear)) {
 		pr_debug("%s: failed to get BPF program info. aborting\n", __func__);
+		err = PTR_ERR(info_linear);
 		goto out;
 	}
 
@@ -862,38 +867,46 @@ static void perf_env__add_bpf_info(struct perf_env *env, u32 id)
 		info_node->info_linear = info_linear;
 		info_node->metadata = bpf_metadata_create(&info_linear->info);
 		if (!perf_env__insert_bpf_prog_info(env, info_node)) {
+			pr_debug("%s: duplicate add bpf info request for id %u\n",
+				 __func__, btf_id);
 			free(info_linear);
 			free(info_node);
+			goto out;
 		}
-	} else
+	} else {
 		free(info_linear);
+		err = -ENOMEM;
+		goto out;
+	}
 
 	if (btf_id == 0)
 		goto out;
 
 	btf = btf__load_from_kernel_by_id(btf_id);
-	if (libbpf_get_error(btf)) {
-		pr_debug("%s: failed to get BTF of id %u, aborting\n",
-			 __func__, btf_id);
-		goto out;
+	if (!btf) {
+		err = -errno;
+		pr_debug("%s: failed to get BTF of id %u %d\n", __func__, btf_id, err);
+	} else {
+		perf_env__fetch_btf(env, btf_id, btf);
 	}
-	perf_env__fetch_btf(env, btf_id, btf);
 
 out:
 	btf__free(btf);
 	close(fd);
+	return err;
 }
 
 static int bpf_event__sb_cb(union perf_event *event, void *data)
 {
 	struct perf_env *env = data;
+	int ret = 0;
 
 	if (event->header.type != PERF_RECORD_BPF_EVENT)
 		return -1;
 
 	switch (event->bpf.type) {
 	case PERF_BPF_EVENT_PROG_LOAD:
-		perf_env__add_bpf_info(env, event->bpf.id);
+		ret = perf_env__add_bpf_info(env, event->bpf.id);
 
 	case PERF_BPF_EVENT_PROG_UNLOAD:
 		/*
@@ -907,7 +920,7 @@ static int bpf_event__sb_cb(union perf_event *event, void *data)
 		break;
 	}
 
-	return 0;
+	return ret;
 }
 
 int evlist__add_bpf_sb_event(struct evlist *evlist, struct perf_env *env)

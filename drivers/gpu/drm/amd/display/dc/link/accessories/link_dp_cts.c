@@ -66,6 +66,7 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 			struct dc_link_settings *link_setting,
 			bool skip_video_pattern)
 {
+	(void)skip_video_pattern;
 	struct pipe_ctx *pipes[MAX_PIPES];
 	struct dc_state *state = link->dc->current_state;
 	struct dc_stream_update stream_update = { 0 };
@@ -76,9 +77,13 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 	uint8_t count;
 	int i;
 	struct audio_output audio_output[MAX_PIPES];
+	struct dc_stream_state *streams_on_link[MAX_PIPES];
+	int num_streams_on_link = 0;
+	struct dc *dc = (struct dc *)link->dc;
 
 	needs_divider_update = (link->dc->link_srv->dp_get_encoding_format(link_setting) !=
-	link->dc->link_srv->dp_get_encoding_format((const struct dc_link_settings *) &link->cur_link_settings));
+		link->dc->link_srv->dp_get_encoding_format((const struct dc_link_settings *) &link->cur_link_settings))
+		|| link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA;
 
 	udelay(100);
 
@@ -138,12 +143,19 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 		pipes[i]->stream_res.tg->funcs->enable_crtc(pipes[i]->stream_res.tg);
 
 	// Set DPMS on with stream update
-	for (i = 0; i < state->stream_count; i++)
-		if (state->streams[i] && state->streams[i]->link && state->streams[i]->link == link) {
-			stream_update.stream = state->streams[i];
+	// Cache all streams on current link since dc_update_planes_and_stream might kill current_state
+	for (i = 0; i < MAX_PIPES; i++) {
+		if (state->streams[i] && state->streams[i]->link && state->streams[i]->link == link)
+			streams_on_link[num_streams_on_link++] = state->streams[i];
+	}
+
+	for (i = 0; i < num_streams_on_link; i++) {
+		if (streams_on_link[i] && streams_on_link[i]->link && streams_on_link[i]->link == link) {
+			stream_update.stream = streams_on_link[i];
 			stream_update.dpms_off = &dpms_off;
-			dc_update_planes_and_stream(state->clk_mgr->ctx->dc, NULL, 0, state->streams[i], &stream_update);
+			dc_update_planes_and_stream(dc, NULL, 0, streams_on_link[i], &stream_update);
 		}
+	}
 }
 
 static void dp_test_send_link_training(struct dc_link *link)
@@ -472,6 +484,7 @@ static void set_crtc_test_pattern(struct dc_link *link,
 				enum dp_test_pattern test_pattern,
 				enum dp_test_pattern_color_space test_pattern_color_space)
 {
+	(void)test_pattern_color_space;
 	enum controller_dp_test_pattern controller_test_pattern;
 	enum dc_color_depth color_depth = pipe_ctx->
 		stream->timing.display_color_depth;
@@ -867,7 +880,7 @@ bool dp_set_test_pattern(
 			return false;
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_enable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 
@@ -915,7 +928,7 @@ bool dp_set_test_pattern(
 				CRTC_STATE_VACTIVE);
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_disable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 

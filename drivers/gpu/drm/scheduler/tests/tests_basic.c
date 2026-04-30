@@ -317,8 +317,8 @@ static void drm_sched_skip_reset(struct kunit *test)
 	KUNIT_ASSERT_FALSE(test, done);
 
 	KUNIT_ASSERT_EQ(test,
-			job->flags & DRM_MOCK_SCHED_JOB_DONT_RESET,
-			0);
+			job->flags & DRM_MOCK_SCHED_JOB_RESET_SKIPPED,
+			DRM_MOCK_SCHED_JOB_RESET_SKIPPED);
 
 	i = drm_mock_sched_advance(sched, 1);
 	KUNIT_ASSERT_EQ(test, i, 1);
@@ -421,7 +421,7 @@ static void drm_sched_change_priority(struct kunit *test)
 
 static struct kunit_case drm_sched_priority_tests[] = {
 	KUNIT_CASE(drm_sched_priorities),
-	KUNIT_CASE(drm_sched_change_priority),
+	KUNIT_CASE_SLOW(drm_sched_change_priority),
 	{}
 };
 
@@ -546,7 +546,7 @@ static void drm_sched_test_credits(struct kunit *test)
 }
 
 static struct kunit_case drm_sched_credits_tests[] = {
-	KUNIT_CASE(drm_sched_test_credits),
+	KUNIT_CASE_SLOW(drm_sched_test_credits),
 	{}
 };
 
