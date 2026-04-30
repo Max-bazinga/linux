@@ -15,7 +15,6 @@
  * This is the x86 equivalent covering the EPT-specific path.
  *
  * TODO (future patches):
- *   - EPT misconfig test (EXIT_REASON_EPT_MISCONFIG)
  *   - EPT fast_page_fault path (access/dirty tracking)
  *   - EPT #VE (EPT_VIOLATION_VE) notification
  *   - Nested EPT fault interception
@@ -44,12 +43,14 @@
 #define TEST_DATA_SLOT		10
 #define TEST_CODE_SLOT		11
 #define TEST_PERM_SLOT		12
+#define TEST_MISCONFIG_GPA	0x40000000ULL
 #define TEST_DATA_GPA		0x10000000ULL
 #define TEST_CODE_GPA		0x20000000ULL
 #define TEST_PERM_GPA		0x30000000ULL
 #define TEST_DATA_GVA		0x40000000ULL
 #define TEST_CODE_GVA		0x50000000ULL
 #define TEST_PERM_GVA		0x60000000ULL
+#define TEST_MISCONFIG_GVA	0x70000000ULL
 #define TEST_REGION_SIZE	PAGE_SIZE
 
 /* Guest↔host synchronization commands */
@@ -59,6 +60,8 @@
 #define UCALL_SYNC_PERM_READ_DONE	3
 #define UCALL_SYNC_PERM_WRITE_MMIO	4
 #define UCALL_SYNC_PERM_EXEC_DONE	5
+#define UCALL_SYNC_MISCONFIG_READ_DONE	6
+#define UCALL_SYNC_MISCONFIG_WRITE_DONE	7
 
 /*
  * Per-fault-type counters for verification.
@@ -70,6 +73,7 @@ struct fault_stats {
 	int write_faults;
 	int exec_faults;	/* counts as !write in uffd, tracked separately */
 	int perm_mmio_exits;
+	int misconfig_mmio_exits;
 };
 static struct fault_stats stats;
 
@@ -288,6 +292,55 @@ static void guest_code_perm(void)
 		fn();
 	}
 	GUEST_SYNC(UCALL_SYNC_PERM_EXEC_DONE);
+
+	GUEST_DONE();
+}
+
+/*
+ * Guest code: EPT misconfig test with an MMIO-backed GPA.
+ *
+ * Accesses a GPA with no backing memslot.  KVM installs an MMIO SPTE
+ * (with bit 11 set as a reserved bit) into the EPT tables.  When the
+ * guest accesses this GPA, hardware triggers EXIT_REASON_EPT_MISCONFIG
+ * because the EPT entry contains a reserved bit pattern.
+ *
+ * KVM's handle_ept_misconfig() then calls kvm_mmu_page_fault() with
+ * PFERR_RSVD_MASK, which ultimately exits to userspace with
+ * KVM_EXIT_MMIO.  The userspace VMM handles the MMIO request and
+ * re-enters the guest.
+ *
+ * Covers the code path:
+ *   handle_ept_misconfig() → kvm_mmu_page_fault(PFERR_RSVD_MASK)
+ *   → KVM_EXIT_MMIO
+ *
+ * Test steps:
+ *   1. Read from misconfig page → MMIO exit (host provides data).
+ *   2. Write to misconfig page → MMIO exit (host captures data).
+ */
+#define MISCONFIG_READ_VALUE	0xCAFEBABEDEADBEEFULL
+#define MISCONFIG_WRITE_VALUE	0xFEEDFACEBEEFCAFEULL
+
+static void guest_code_misconfig(void)
+{
+	volatile uint64_t val;
+	uint64_t *mmio_page = (uint64_t *)TEST_MISCONFIG_GVA;
+
+	/*
+	 * STAGE 1: Read from misconfig MMIO page.
+	 * Guest issues a read → hardware EPT_MISCONFIG → KVM_EXIT_MMIO.
+	 * Host fills in MISCONFIG_READ_VALUE.
+	 */
+	val = READ_ONCE(*mmio_page);
+	GUEST_ASSERT_EQ(val, MISCONFIG_READ_VALUE);
+	GUEST_SYNC(UCALL_SYNC_MISCONFIG_READ_DONE);
+
+	/*
+	 * STAGE 2: Write to misconfig MMIO page.
+	 * Guest writes MISCONFIG_WRITE_VALUE → hardware EPT_MISCONFIG →
+	 * KVM_EXIT_MMIO.  Host reads the data from run->mmio.data.
+	 */
+	WRITE_ONCE(*mmio_page, MISCONFIG_WRITE_VALUE);
+	GUEST_SYNC(UCALL_SYNC_MISCONFIG_WRITE_DONE);
 
 	GUEST_DONE();
 }
@@ -562,6 +615,101 @@ static void run_guest_perm(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
 	pr_info("=== EPT permission fault test: PASS ===\n");
 }
 
+/*
+ * Run the EPT misconfig test.
+ *
+ * Creates a virtual address mapping to a GPA that has NO backing
+ * memslot.  When the guest accesses this GPA, KVM installs an MMIO
+ * SPTE with a reserved bit (bit 11), which causes the hardware to
+ * trigger EXIT_REASON_EPT_MISCONFIG.  KVM's handle_ept_misconfig()
+ * turns this into a KVM_EXIT_MMIO to userspace.
+ *
+ * The test verifies:
+ *   1. Read from misconfig MMIO page → KVM_EXIT_MMIO, host fills data.
+ *   2. Write to misconfig MMIO page → KVM_EXIT_MMIO, host reads data.
+ */
+static void run_guest_misconfig(struct kvm_vm *vm, struct kvm_vcpu *vcpu)
+{
+	struct kvm_run *run = vcpu->run;
+	struct ucall uc;
+	uint64_t mmio_page_data;
+
+	/*
+	 * virt_map creates the GVA→GPA virtual mapping but NO memslot
+	 * is created for TEST_MISCONFIG_GPA.  Any access to this GPA
+	 * triggers an MMIO SPTE in EPT → EPT_MISCONFIG → KVM_EXIT_MMIO.
+	 */
+	virt_map(vm, TEST_MISCONFIG_GVA, TEST_MISCONFIG_GPA,
+		 TEST_REGION_SIZE / PAGE_SIZE);
+
+	pr_info("=== EPT misconfig test (no memslot MMIO) ===\n");
+
+	/*
+	 * Stage 1: Read from misconfig MMIO page.
+	 * Guest does READ_ONCE(*mmio_page) → EPT_MISCONFIG → KVM_EXIT_MMIO.
+	 * Host fills MISCONFIG_READ_VALUE into mmio.data, KVM re-enters
+	 * guest which completes the read and verifies the value.
+	 */
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(run->exit_reason, KVM_EXIT_MMIO);
+	TEST_ASSERT_EQ(run->mmio.phys_addr, TEST_MISCONFIG_GPA);
+	TEST_ASSERT(!run->mmio.is_write,
+		    "Expected MMIO read for misconfig test");
+	TEST_ASSERT_EQ(run->mmio.len, 8);
+
+	mmio_page_data = MISCONFIG_READ_VALUE;
+	memcpy(run->mmio.data, &mmio_page_data, 8);
+	stats_inc(&stats.misconfig_mmio_exits);
+
+	vcpu_run_complete_io(vcpu);
+
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], UCALL_SYNC_MISCONFIG_READ_DONE);
+	pr_info("stage misconfig-read done: misconfig_mmio_exits=%d\n",
+		stats_read(&stats.misconfig_mmio_exits));
+
+	/*
+	 * Stage 2: Write to misconfig MMIO page.
+	 * Guest does WRITE_ONCE(*mmio_page, MISCONFIG_WRITE_VALUE) →
+	 * EPT_MISCONFIG → KVM_EXIT_MMIO.  Host reads the write data
+	 * from mmio.data and verifies it.
+	 */
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(run->exit_reason, KVM_EXIT_MMIO);
+	TEST_ASSERT_EQ(run->mmio.phys_addr, TEST_MISCONFIG_GPA);
+	TEST_ASSERT(run->mmio.is_write,
+		    "Expected MMIO write for misconfig test");
+	TEST_ASSERT_EQ(run->mmio.len, 8);
+
+	memcpy(&mmio_page_data, run->mmio.data, 8);
+	TEST_ASSERT_EQ(mmio_page_data, MISCONFIG_WRITE_VALUE);
+	stats_inc(&stats.misconfig_mmio_exits);
+
+	vcpu_run_complete_io(vcpu);
+
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], UCALL_SYNC_MISCONFIG_WRITE_DONE);
+	pr_info("stage misconfig-write done: misconfig_mmio_exits=%d\n",
+		stats_read(&stats.misconfig_mmio_exits));
+
+	/* Final: GUEST_DONE */
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_DONE:
+		break;
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+		break;
+	default:
+		TEST_FAIL("Unexpected ucall: %lu", uc.cmd);
+	}
+
+	/* Verify we saw exactly 2 MMIO exits (read + write) */
+	TEST_ASSERT_EQ(stats_read(&stats.misconfig_mmio_exits), 2);
+
+	pr_info("=== EPT misconfig test: PASS ===\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vcpu *vcpu;
@@ -582,6 +730,11 @@ int main(int argc, char *argv[])
 	/* ===== Part 2: EPT permission fault test (RO memslot) ===== */
 	vm = vm_create_with_one_vcpu(&vcpu, guest_code_perm);
 	run_guest_perm(vm, vcpu);
+	kvm_vm_free(vm);
+
+	/* ==== Part 3: EPT misconfig test (MMIO SPTE / EXIT_REASON_EPT_MISCONFIG) ===== */
+	vm = vm_create_with_one_vcpu(&vcpu, guest_code_misconfig);
+	run_guest_misconfig(vm, vcpu);
 	kvm_vm_free(vm);
 
 	pr_info("ept_fault_test: all tests passed\n");
