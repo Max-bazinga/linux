@@ -57,9 +57,18 @@ static void vt_vm_pre_destroy(struct kvm *kvm)
 static void vt_vm_destroy(struct kvm *kvm)
 {
 	if (is_td(kvm))
-               return tdx_vm_destroy(kvm);
+		return tdx_vm_destroy(kvm);
 
-       vmx_vm_destroy(kvm);
+	vmx_vm_destroy(kvm);
+}
+
+static bool vt_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+{
+	if (!is_td(kvm))
+		return false;
+
+	tdx_sync_dirty_log(kvm, memslot);
+	return true;
 }
 
 static int vt_vcpu_precreate(struct kvm *kvm)
@@ -887,6 +896,7 @@ struct kvm_x86_ops vt_x86_ops __initdata = {
 	.vm_init = vt_op(vm_init),
 	.vm_destroy = vt_op(vm_destroy),
 	.vm_pre_destroy = vt_op_tdx_only(vm_pre_destroy),
+	.sync_dirty_log = vt_op_tdx_only(sync_dirty_log),
 
 	.vcpu_precreate = vt_op(vcpu_precreate),
 	.vcpu_create = vt_op(vcpu_create),

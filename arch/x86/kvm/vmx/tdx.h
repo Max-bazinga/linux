@@ -7,6 +7,7 @@
 
 #ifdef CONFIG_KVM_INTEL_TDX
 #include "common.h"
+#include "tdx_dirty.h"
 
 int tdx_hardware_setup(void);
 void tdx_hardware_unsetup(void);
@@ -48,6 +49,9 @@ struct kvm_tdx {
 	 * Set/unset is protected with kvm->mmu_lock.
 	 */
 	bool wait_for_sept_zap;
+
+	/* Dirty page tracking accelerator for live migration */
+	struct tdx_dirty_tracker dirty_tracker;
 };
 
 /* TDX module vCPU states */

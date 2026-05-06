@@ -1776,6 +1776,7 @@ struct kvm_x86_ops {
 	int (*vm_init)(struct kvm *kvm);
 	void (*vm_destroy)(struct kvm *kvm);
 	void (*vm_pre_destroy)(struct kvm *kvm);
+	bool (*sync_dirty_log)(struct kvm *kvm, struct kvm_memory_slot *memslot);
 
 	/* Create, but do not attach this VCPU */
 	int (*vcpu_precreate)(struct kvm *kvm);

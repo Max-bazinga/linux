@@ -6722,6 +6722,8 @@ static int kvm_vm_ioctl_set_nr_mmu_pages(struct kvm *kvm,
 
 void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
 {
+	if (static_call(kvm_x86_sync_dirty_log)(kvm, memslot))
+		return;
 
 	/*
 	 * Flush all CPUs' dirty log buffers to the  dirty_bitmap.  Called

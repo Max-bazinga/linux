@@ -607,6 +607,9 @@ void tdx_vm_destroy(struct kvm *kvm)
 {
 	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
 
+	/* Destroy dirty page tracking accelerator */
+	tdx_dirty_tracker_destroy(&kvm_tdx->dirty_tracker);
+
 	tdx_reclaim_td_control_pages(kvm);
 
 	kvm_tdx->state = TD_STATE_UNINITIALIZED;
@@ -666,7 +669,10 @@ int tdx_vm_init(struct kvm *kvm)
 
 	kvm_tdx->state = TD_STATE_UNINITIALIZED;
 
-	return 0;
+	/* Initialize dirty page tracking accelerator */
+	return tdx_dirty_tracker_init(&kvm_tdx->dirty_tracker, kvm_tdx,
+				      KVM_MAX_VCPUS * 1024); /* 4GB per vCPU estimate */
+
 }
 
 int tdx_vcpu_create(struct kvm_vcpu *vcpu)
@@ -1651,6 +1657,9 @@ static int tdx_mem_page_aug(struct kvm *kvm, gfn_t gfn,
 
 	if (TDX_BUG_ON_2(err, TDH_MEM_PAGE_AUG, entry, level_state, kvm))
 		return -EIO;
+
+	/* Track page allocation for dirty page heuristics */
+	tdx_dirty_record_aug(&kvm_tdx->dirty_tracker, gpa);
 
 	return 0;
 }
