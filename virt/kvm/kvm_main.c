@@ -3961,6 +3961,12 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
 	struct kvm_vcpu *vcpu;
 	int try;
 
+#ifdef CONFIG_BPF
+	/* KVM-BPF: check if BPF policy wants to skip yield */
+	if (kvm_bpf_on_spin(me) == BPF_SKIP_YIELD)
+		return;
+#endif
+
 	nr_vcpus = atomic_read(&kvm->online_vcpus);
 	if (nr_vcpus < 2)
 		return;
@@ -4025,8 +4031,17 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
 		if (!kvm_vcpu_eligible_for_directed_yield(vcpu))
 			continue;
 
+#ifdef CONFIG_BPF
+		/* KVM-BPF: track yield attempts */
+		me->bpf_stats.yield_attempts++;
+#endif
+
 		yielded = kvm_vcpu_yield_to(vcpu);
 		if (yielded > 0) {
+#ifdef CONFIG_BPF
+			/* KVM-BPF: track successful yields */
+			me->bpf_stats.yield_successes++;
+#endif
 			WRITE_ONCE(kvm->last_boosted_vcpu, idx);
 			break;
 		} else if (yielded < 0 && !--try) {

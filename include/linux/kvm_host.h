@@ -381,6 +381,21 @@ struct kvm_vcpu {
 		bool dy_eligible;
 	} spin_loop;
 #endif
+
+#ifdef CONFIG_BPF
+	/* KVM-BPF: lightweight per-vCPU statistics cache.
+	 * Updated on coordination-relevant VM exits (PAUSE, HLT, IPI).
+	 * Used by BPF hook programs via struct kvm_bpf_ctx.
+	 * NOT updated per-exit; only for relevant event types.
+	 */
+	struct {
+		u64 total_exits;
+		u64 ple_exits;
+		u64 yield_attempts;
+		u64 yield_successes;
+	} bpf_stats;
+#endif
+
 	bool wants_to_run;
 	bool preempted;
 	bool ready;
@@ -1548,6 +1563,46 @@ static inline void kvm_vcpu_kick(struct kvm_vcpu *vcpu)
 
 int kvm_vcpu_yield_to(struct kvm_vcpu *target);
 void kvm_vcpu_on_spin(struct kvm_vcpu *vcpu, bool yield_to_kernel_mode);
+
+#ifdef CONFIG_BPF
+#include <linux/bpf.h>
+
+/* KVM-BPF context passed to eBPF hook programs.
+ * Exposes virtualization-aware coordination state, not raw KVM internals.
+ */
+struct kvm_bpf_ctx {
+	u32 vm_id;
+	u32 vcpu_id;
+	u32 cpu;
+	u32 numa_node;
+	u64 timestamp_ns;
+
+	/* Coordination state snapshot */
+	u64 ple_exits;
+	u64 total_exits;
+	u64 yield_attempts;
+	u64 yield_successes;
+
+	/* Current event */
+	u32 exit_reason;
+};
+
+/* KVM-BPF event types passed to kvm_bpf_account_exit() */
+#define KVM_BPF_EVENT_PAUSE	1
+#define KVM_BPF_EVENT_HLT	2
+#define KVM_BPF_EVENT_IPI	3
+
+/* KVM-BPF hook return values */
+#define BPF_YIELD_NORMAL	0
+#define BPF_SKIP_YIELD		1
+#define BPF_YIELD_PREFER_LOCK_HOLDER	2
+
+/* Hook function declarations */
+void kvm_bpf_account_exit(struct kvm_vcpu *vcpu, u32 exit_reason);
+int kvm_bpf_on_spin(struct kvm_vcpu *vcpu);
+int kvm_bpf_select_target(struct kvm_vcpu *vcpu);
+u32 kvm_bpf_get_ple_window(struct kvm_vcpu *vcpu, u32 current_window);
+#endif /* CONFIG_BPF */
 
 void kvm_flush_remote_tlbs(struct kvm *kvm);
 void kvm_flush_remote_tlbs_range(struct kvm *kvm, gfn_t gfn, u64 nr_pages);

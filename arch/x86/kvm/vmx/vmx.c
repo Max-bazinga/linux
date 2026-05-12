@@ -6095,6 +6095,10 @@ static int handle_pause(struct kvm_vcpu *vcpu)
 	 * so the vcpu must be CPL=0 if it gets a PAUSE exit.
 	 */
 	kvm_vcpu_on_spin(vcpu, true);
+
+	/* KVM-BPF: account PLE exit for coordination statistics */
+	kvm_bpf_account_exit(vcpu, KVM_BPF_EVENT_PAUSE);
+
 	return kvm_skip_emulated_instruction(vcpu);
 }
 
