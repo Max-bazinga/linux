@@ -1569,6 +1569,9 @@ void kvm_vcpu_on_spin(struct kvm_vcpu *vcpu, bool yield_to_kernel_mode);
 
 /* KVM-BPF context passed to eBPF hook programs.
  * Exposes virtualization-aware coordination state, not raw KVM internals.
+ *
+ * BPF_PROG_TYPE_KVM_SCHED programs receive this as their context argument.
+ * All fields are read-only; KVM builds the context before each hook call.
  */
 struct kvm_bpf_ctx {
 	u32 vm_id;
@@ -1583,8 +1586,9 @@ struct kvm_bpf_ctx {
 	u64 yield_attempts;
 	u64 yield_successes;
 
-	/* Current event */
+	/* Current event / PLE-specific fields */
 	u32 exit_reason;
+	u32 current_ple_window;	/* Current PLE window value (input) */
 };
 
 /* KVM-BPF event types passed to kvm_bpf_account_exit() */
@@ -1602,6 +1606,11 @@ void kvm_bpf_account_exit(struct kvm_vcpu *vcpu, u32 exit_reason);
 int kvm_bpf_on_spin(struct kvm_vcpu *vcpu);
 int kvm_bpf_select_target(struct kvm_vcpu *vcpu);
 u32 kvm_bpf_get_ple_window(struct kvm_vcpu *vcpu, u32 current_window);
+
+/* BPF_PROG_TYPE_KVM_SCHED ops — defined in virt/kvm/kvm_bpf.c */
+struct bpf_verifier_ops;
+extern const struct bpf_verifier_ops kvm_bpf_verifier_ops;
+extern const struct bpf_prog_ops kvm_bpf_prog_ops;
 #endif /* CONFIG_BPF */
 
 void kvm_flush_remote_tlbs(struct kvm *kvm);
