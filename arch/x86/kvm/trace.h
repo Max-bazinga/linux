@@ -1965,6 +1965,75 @@ TRACE_EVENT(kvm_rmp_fault,
 		  __entry->error_code, __entry->rmp_level, __entry->psmash_ret)
 );
 
+/* Scheduling hint framework tracepoints */
+
+TRACE_EVENT(kvm_sched_event,
+	TP_PROTO(unsigned int vcpu_id, int type, u64 count),
+	TP_ARGS(vcpu_id, type, count),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, vcpu_id)
+		__field(int,	   type)
+		__field(u64,	   count)
+	),
+
+	TP_fast_assign(
+		__entry->vcpu_id	= vcpu_id;
+		__entry->type		= type;
+		__entry->count		= count;
+	),
+
+	TP_printk("vcpu %u event %d count %llu",
+		  __entry->vcpu_id, __entry->type, __entry->count)
+);
+
+TRACE_EVENT(kvm_sched_action,
+	TP_PROTO(unsigned int vcpu_id, int action, int prev_action),
+	TP_ARGS(vcpu_id, action, prev_action),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, vcpu_id)
+		__field(int,	   action)
+		__field(int,	   prev_action)
+	),
+
+	TP_fast_assign(
+		__entry->vcpu_id	= vcpu_id;
+		__entry->action		= action;
+		__entry->prev_action	= prev_action;
+	),
+
+	TP_printk("vcpu %u action %d prev %d",
+		  __entry->vcpu_id, __entry->action, __entry->prev_action)
+);
+
+TRACE_EVENT(kvm_sched_guard,
+	TP_PROTO(unsigned int vcpu_id, int guard_level,
+		 u64 ple_rate_ema, u64 steal_ema, u64 yield_miss_ema),
+	TP_ARGS(vcpu_id, guard_level, ple_rate_ema, steal_ema, yield_miss_ema),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, vcpu_id)
+		__field(int,	   guard_level)
+		__field(u64,	   ple_rate_ema)
+		__field(u64,	   steal_ema)
+		__field(u64,	   yield_miss_ema)
+	),
+
+	TP_fast_assign(
+		__entry->vcpu_id	= vcpu_id;
+		__entry->guard_level	= guard_level;
+		__entry->ple_rate_ema	= ple_rate_ema;
+		__entry->steal_ema	= steal_ema;
+		__entry->yield_miss_ema = yield_miss_ema;
+	),
+
+	TP_printk("vcpu %u guard %d ple_ema %lu steal_ema %lu yield_miss_ema %lu",
+		  __entry->vcpu_id, __entry->guard_level,
+		  __entry->ple_rate_ema, __entry->steal_ema,
+		  __entry->yield_miss_ema)
+);
+
 #endif /* _TRACE_KVM_H */
 
 #undef TRACE_INCLUDE_PATH

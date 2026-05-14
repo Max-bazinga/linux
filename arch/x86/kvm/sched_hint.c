@@ -13,6 +13,7 @@
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 
+#include "trace.h"
 #include "sched_hint.h"
 
 /*
@@ -167,6 +168,9 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 	/* 1. Record the event */
 	stats->events[type]++;
 
+	/* 1a. Trace the event */
+	trace_kvm_sched_event(vcpu->vcpu_id, type, stats->events[type]);
+
 	/* 2. Periodic rate sampling */
 	if (time_after(jiffies, stats->last_sample_jiffies +
 		       msecs_to_jiffies(sample_interval_ms))) {
@@ -174,6 +178,14 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 
 		/* 2a. Safety net guard check */
 		sched_guard_check(stats);
+
+		/* 2b. Trace guard state when active */
+		if (stats->guard_level != KVM_SCHED_GUARD_OK)
+			trace_kvm_sched_guard(vcpu->vcpu_id,
+					      stats->guard_level,
+					      stats->ple_rate_ema,
+					      stats->steal_time_ema,
+					      stats->yield_miss_rate_ema);
 	}
 
 	/* 3. Check guard level */
@@ -183,6 +195,8 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 	/* 4. Basic policy: PLE + overcommit -> yield */
 	if (type == KVM_SCHED_EVT_PLE && is_overcommitted(vcpu->kvm))
 		action = KVM_SCHED_ACT_YIELD;
+
+	trace_kvm_sched_action(vcpu->vcpu_id, action, KVM_SCHED_ACT_NONE);
 
 	return action;
 }
