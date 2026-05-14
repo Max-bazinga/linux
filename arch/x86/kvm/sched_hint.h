@@ -50,6 +50,7 @@ struct kvm_sched_hint_stats {
 	/* Guard state */
 	enum kvm_sched_guard_level guard_level;
 	u64 guard_trigger_count;
+	unsigned int consecutive_bad_windows;
 	/* Rate tracking (EMAs) */
 	unsigned long ple_rate_ema;		/* PLE exits/sec * 100 */
 	unsigned long steal_time_ema;		/* steal time pct * 100 */

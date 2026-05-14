@@ -16,8 +16,7 @@
 #include "sched_hint.h"
 
 /*
- * Module parameters — base configuration for V0.
- * Guard thresholds added in patch 4/8.
+ * Module parameters — base configuration with safety net guard.
  */
 static unsigned int sched_policy = 1;	/* 0=off, 1=basic */
 module_param(sched_policy, uint, 0644);
@@ -25,8 +24,21 @@ module_param(sched_policy, uint, 0644);
 static unsigned int ple_rate_threshold = 10000;	/* PLE/s * 100 */
 module_param(ple_rate_threshold, uint, 0644);
 
-static unsigned int sample_interval_ms = 100;	/* 100ms sampling */
+static unsigned int sample_interval_ms = 100;	/* 100ms sampling window */
 module_param(sample_interval_ms, uint, 0644);
+
+/* Safety net guard thresholds */
+static unsigned int guard_ple_rate_limit = 50000;	/* PLE/s * 100 */
+module_param(guard_ple_rate_limit, uint, 0644);
+
+static unsigned int guard_yield_miss_pct = 5000;	/* yield miss % * 100 (50%) */
+module_param(guard_yield_miss_pct, uint, 0644);
+
+static unsigned int guard_steal_low_pct = 1000;		/* steal time % * 100 (10%)  */
+module_param(guard_steal_low_pct, uint, 0644);
+
+static unsigned int guard_windows = 5;			/* consecutive bad windows */
+module_param(guard_windows, uint, 0644);
 
 /*
  * EMA alpha factor.  Higher = more weight on recent samples.
@@ -79,6 +91,56 @@ static void sched_sample_stats(struct kvm_vcpu *vcpu,
 }
 
 /*
+ * sched_guard_check — safety net guard against pathological spin
+ *
+ * Examines per-vCPU EMA rates and detects abnormal spin patterns:
+ *   (1) PLE exits above threshold    → excessive contention
+ *   (2) Steal time below threshold   → vCPU not actually preempted
+ *   (3) Yield miss rate above threshold → yields failing
+ *
+ * When all three conditions persist for @guard_windows consecutive
+ * sampling windows, the guard escalates:
+ *   OK → RATE_LIMIT (throttle policy)
+ *   RATE_LIMIT sustained → DISABLE (kill policy for this vCPU)
+ *
+ * Returns the current guard level.
+ */
+static enum kvm_sched_guard_level
+sched_guard_check(struct kvm_sched_hint_stats *stats)
+{
+	bool bad_pattern;
+
+	bad_pattern = stats->ple_rate_ema > guard_ple_rate_limit &&
+		      stats->steal_time_ema < guard_steal_low_pct &&
+		      stats->yield_miss_rate_ema > guard_yield_miss_pct;
+
+	if (bad_pattern) {
+		stats->consecutive_bad_windows++;
+	} else {
+		/* Good window: decay the counter */
+		if (stats->consecutive_bad_windows)
+			stats->consecutive_bad_windows--;
+		return KVM_SCHED_GUARD_OK;
+	}
+
+	if (stats->consecutive_bad_windows >= guard_windows) {
+		if (stats->guard_level == KVM_SCHED_GUARD_OK) {
+			stats->guard_level = KVM_SCHED_GUARD_RATE_LIMIT;
+			stats->guard_trigger_count++;
+		} else if (stats->guard_level == KVM_SCHED_GUARD_RATE_LIMIT) {
+			/*
+			 * Still bad after rate-limiting → disable
+			 * policy entirely for this vCPU.
+			 */
+			stats->guard_level = KVM_SCHED_GUARD_DISABLE;
+			stats->guard_trigger_count++;
+		}
+	}
+
+	return stats->guard_level;
+}
+
+/*
  * kvm_sched_event — main entry point for scheduling events
  *
  * Called from VM-exit handlers (PLE, HLT, PV yield) to collect
@@ -107,10 +169,18 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 
 	/* 2. Periodic rate sampling */
 	if (time_after(jiffies, stats->last_sample_jiffies +
-		       msecs_to_jiffies(sample_interval_ms)))
+		       msecs_to_jiffies(sample_interval_ms))) {
 		sched_sample_stats(vcpu, stats);
 
-	/* 3. Basic policy: PLE + overcommit -> yield */
+		/* 2a. Safety net guard check */
+		sched_guard_check(stats);
+	}
+
+	/* 3. Check guard level */
+	if (stats->guard_level == KVM_SCHED_GUARD_DISABLE)
+		return KVM_SCHED_ACT_NONE;
+
+	/* 4. Basic policy: PLE + overcommit -> yield */
 	if (type == KVM_SCHED_EVT_PLE && is_overcommitted(vcpu->kvm))
 		action = KVM_SCHED_ACT_YIELD;
 
