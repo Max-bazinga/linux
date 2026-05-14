@@ -8,6 +8,7 @@
 
 #include <linux/kvm_host.h>
 #include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include "lapic.h"
 #include "mmu.h"
 #include "mmu/mmu_internal.h"
