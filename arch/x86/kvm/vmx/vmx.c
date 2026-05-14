@@ -29,6 +29,8 @@
 #include <linux/tboot.h>
 #include <linux/trace_events.h>
 
+#include "sched_hint.h"
+
 #include <asm/apic.h>
 #include <asm/asm.h>
 #include <asm/cpu.h>
@@ -6089,12 +6091,14 @@ static int handle_pause(struct kvm_vcpu *vcpu)
 		grow_ple_window(vcpu);
 
 	/*
-	 * Intel sdm vol3 ch-25.1.3 says: The "PAUSE-loop exiting"
-	 * VM-execution control is ignored if CPL > 0. OTOH, KVM
-	 * never set PAUSE_EXITING and just set PLE if supported,
-	 * so the vcpu must be CPL=0 if it gets a PAUSE exit.
+	 * Consult the scheduling hint framework.  If it recommends
+	 * yielding (PLE + overcommit), proceed with the existing
+	 * directed-yield path.  Otherwise skip it — not overcommitted
+	 * or policy disabled — and just return to the guest.
 	 */
-	kvm_vcpu_on_spin(vcpu, true);
+	if (kvm_sched_event(vcpu, KVM_SCHED_EVT_PLE) == KVM_SCHED_ACT_YIELD)
+		kvm_vcpu_on_spin(vcpu, true);
+
 	return kvm_skip_emulated_instruction(vcpu);
 }
 

@@ -33,6 +33,7 @@
 #include "lapic.h"
 #include "xen.h"
 #include "smm.h"
+#include "sched_hint.h"
 
 #include <linux/clocksource.h>
 #include <linux/interrupt.h>
@@ -10383,6 +10384,12 @@ static void kvm_sched_yield(struct kvm_vcpu *vcpu, unsigned long dest_id)
 	struct kvm_vcpu *target = NULL;
 	struct kvm_apic_map *map;
 
+	/*
+	 * Notify the scheduling hint framework of the PV yield
+	 * hypercall so it can track yield attempt/miss ratios.
+	 */
+	kvm_sched_event(vcpu, KVM_SCHED_EVT_PV_YIELD);
+
 	vcpu->stat.directed_yield_attempted++;
 
 	if (single_task_running())
@@ -11807,6 +11814,14 @@ static int __kvm_emulate_halt(struct kvm_vcpu *vcpu, int state, int reason)
 	 * handling wake events.
 	 */
 	++vcpu->stat.halt_exits;
+
+	/*
+	 * Notify the scheduling hint framework that this vCPU
+	 * executed HLT.  This feeds the rate-sampling pipeline
+	 * used by the PLE policy and safety net.
+	 */
+	kvm_sched_event(vcpu, KVM_SCHED_EVT_HLT);
+
 	if (lapic_in_kernel(vcpu)) {
 		if (kvm_vcpu_has_events(vcpu) || vcpu->arch.pv.pv_unhalted)
 			state = KVM_MP_STATE_RUNNABLE;
@@ -12890,6 +12905,10 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	}
 	kvm_pmu_init(vcpu);
 
+	r = kvm_sched_hint_init(vcpu);
+	if (r)
+		goto fail_sched_hint;
+
 	vcpu->arch.pending_external_vector = -1;
 	vcpu->arch.preempted_in_kernel = false;
 
@@ -12912,6 +12931,11 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 
 free_guest_fpu:
 	fpu_free_guest_fpstate(&vcpu->arch.guest_fpu);
+fail_sched_hint:
+	/* kvm_sched_hint_init either succeeded before this point
+	 * or was never reached.  No separate cleanup here because
+	 * kvm_sched_hint_destroy handles NULL safely.
+	 */
 free_emulate_ctxt:
 	kmem_cache_free(x86_emulator_cache, vcpu->arch.emulate_ctxt);
 free_wbinvd_dirty_mask:
@@ -12962,6 +12986,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
 	kvm_xen_destroy_vcpu(vcpu);
 	kvm_hv_vcpu_uninit(vcpu);
 	kvm_pmu_destroy(vcpu);
+	kvm_sched_hint_destroy(vcpu);
 	kfree(vcpu->arch.mce_banks);
 	kfree(vcpu->arch.mci_ctl2_banks);
 	kvm_free_lapic(vcpu);
