@@ -10417,8 +10417,11 @@ static void kvm_sched_yield(struct kvm_vcpu *vcpu, unsigned long dest_id)
 		goto no_yield;
 
 	vcpu->stat.directed_yield_successful++;
+	kvm_sched_hint_track_yield(vcpu, true);
+	return;
 
 no_yield:
+	kvm_sched_hint_track_yield(vcpu, false);
 	return;
 }
 

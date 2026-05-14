@@ -56,6 +56,8 @@ struct kvm_sched_hint_stats {
 	unsigned long steal_time_ema;		/* steal time pct * 100 */
 	unsigned long yield_miss_rate_ema;	/* yield miss rate * 100 */
 	unsigned long last_sample_jiffies;
+	/* Snapshot of event counters at last sample for delta computation */
+	u64 last_sampled_events[NR_KVM_SCHED_EVT];
 };
 
 /* Policy configuration (module parameters) */
@@ -75,6 +77,7 @@ int kvm_sched_hint_init(struct kvm_vcpu *vcpu);
 void kvm_sched_hint_destroy(struct kvm_vcpu *vcpu);
 enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 				      enum kvm_sched_event_type type);
+void kvm_sched_hint_track_yield(struct kvm_vcpu *vcpu, bool success);
 
 #endif /* CONFIG_KVM_X86 */
 

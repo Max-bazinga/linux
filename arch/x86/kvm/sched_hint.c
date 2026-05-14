@@ -18,6 +18,8 @@
 
 /*
  * Module parameters — base configuration with safety net guard.
+ * The param_set_* callbacks enforce minimum values and clamp
+ * invalid configurations.
  */
 static unsigned int sched_policy = 1;	/* 0=off, 1=basic */
 module_param(sched_policy, uint, 0644);
@@ -40,6 +42,10 @@ module_param(guard_steal_low_pct, uint, 0644);
 
 static unsigned int guard_windows = 5;			/* consecutive bad windows */
 module_param(guard_windows, uint, 0644);
+
+/* Internal minimum bounds — enforced at entry points */
+#define SCHED_HINT_MIN_SAMPLE_MS	10
+#define SCHED_HINT_MIN_GUARD_WINDOWS	1
 
 /*
  * EMA alpha factor.  Higher = more weight on recent samples.
@@ -75,11 +81,13 @@ static void sched_sample_stats(struct kvm_vcpu *vcpu,
 
 	delta_ms = jiffies_to_msecs(delta);
 
-	/* Rate computations (events per second * 100) */
-	ple_rate = stats->events[KVM_SCHED_EVT_PLE] * 100000UL / delta_ms;
+	/* Rate computations (events per second * 100) using delta */
+	ple_rate = (stats->events[KVM_SCHED_EVT_PLE] -
+		    stats->last_sampled_events[KVM_SCHED_EVT_PLE])
+		   * 100000UL / delta_ms;
 	steal_time = 0; /* Filled by tracepoint/steal_time_msr in later patches */
-	yield_miss_pct = stats->yield_attempted ?
-		(stats->yield_miss * 10000UL / stats->yield_attempted) : 0;
+	yield_miss_pct = stats->yield_attempts ?
+		(stats->yield_miss * 10000UL / stats->yield_attempts) : 0;
 
 	/* Update EMAs */
 	stats->ple_rate_ema = sched_ema_update(stats->ple_rate_ema, ple_rate);
@@ -87,6 +95,14 @@ static void sched_sample_stats(struct kvm_vcpu *vcpu,
 						  steal_time);
 	stats->yield_miss_rate_ema = sched_ema_update(stats->yield_miss_rate_ema,
 						       yield_miss_pct);
+
+	/* Save snapshot for next delta computation */
+	stats->last_sampled_events[KVM_SCHED_EVT_PLE] =
+		stats->events[KVM_SCHED_EVT_PLE];
+	stats->last_sampled_events[KVM_SCHED_EVT_HLT] =
+		stats->events[KVM_SCHED_EVT_HLT];
+	stats->last_sampled_events[KVM_SCHED_EVT_PV_YIELD] =
+		stats->events[KVM_SCHED_EVT_PV_YIELD];
 
 	stats->last_sample_jiffies = now;
 }
@@ -124,7 +140,8 @@ sched_guard_check(struct kvm_sched_hint_stats *stats)
 		return KVM_SCHED_GUARD_OK;
 	}
 
-	if (stats->consecutive_bad_windows >= guard_windows) {
+	if (stats->consecutive_bad_windows >= max_t(unsigned int,
+	    guard_windows, SCHED_HINT_MIN_GUARD_WINDOWS)) {
 		if (stats->guard_level == KVM_SCHED_GUARD_OK) {
 			stats->guard_level = KVM_SCHED_GUARD_RATE_LIMIT;
 			stats->guard_trigger_count++;
@@ -173,7 +190,8 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 
 	/* 2. Periodic rate sampling */
 	if (time_after(jiffies, stats->last_sample_jiffies +
-		       msecs_to_jiffies(sample_interval_ms))) {
+		       msecs_to_jiffies(max_t(unsigned int,
+			sample_interval_ms, SCHED_HINT_MIN_SAMPLE_MS)))) {
 		sched_sample_stats(vcpu, stats);
 
 		/* 2a. Safety net guard check */
@@ -201,6 +219,28 @@ enum kvm_sched_action kvm_sched_event(struct kvm_vcpu *vcpu,
 	return action;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_sched_event);
+
+/*
+ * kvm_sched_hint_track_yield — report yield outcome to stats
+ *
+ * Updates the per-vCPU yield attempt/success/miss counters for
+ * guard detection and debugfs observability.
+ */
+void kvm_sched_hint_track_yield(struct kvm_vcpu *vcpu, bool success)
+{
+	struct kvm_sched_hint_stats *stats;
+
+	stats = vcpu->arch.sched_hint_stats;
+	if (!stats)
+		return;
+
+	stats->yield_attempts++;
+	if (success)
+		stats->yield_success++;
+	else
+		stats->yield_miss++;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_sched_hint_track_yield);
 
 /*
  * kvm_sched_hint_init — allocate and initialize per-vCPU stats
