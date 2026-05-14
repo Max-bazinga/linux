@@ -1117,6 +1117,12 @@ struct kvm_vcpu_arch {
 #if IS_ENABLED(CONFIG_HYPERV)
 	hpa_t hv_root_tdp;
 #endif
+
+	/*
+	 * Per-vCPU scheduling hint statistics, allocated on demand.
+	 * Full definition in arch/x86/kvm/sched_hint.h.
+	 */
+	struct kvm_sched_hint_stats __rcu *sched_hint_stats;
 };
 
 struct kvm_lpage_info {
