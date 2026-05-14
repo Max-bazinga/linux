@@ -11,6 +11,7 @@
 #include "lapic.h"
 #include "mmu.h"
 #include "mmu/mmu_internal.h"
+#include "sched_hint.h"
 
 static int vcpu_get_timer_advance_ns(void *data, u64 *val)
 {
@@ -56,6 +57,55 @@ static int vcpu_get_tsc_scaling_frac_bits(void *data, u64 *val)
 
 DEFINE_SIMPLE_ATTRIBUTE(vcpu_tsc_scaling_frac_fops, vcpu_get_tsc_scaling_frac_bits, NULL, "%llu\n");
 
+static int sched_hint_stats_show(struct seq_file *m, void *unused)
+{
+	struct kvm_vcpu *vcpu = m->private;
+	struct kvm_sched_hint_stats *stats;
+
+	stats = vcpu->arch.sched_hint_stats;
+	if (!stats)
+		return 0;
+
+	seq_printf(m, "ple_events       %llu\n",
+		   stats->events[KVM_SCHED_EVT_PLE]);
+	seq_printf(m, "hlt_events       %llu\n",
+		   stats->events[KVM_SCHED_EVT_HLT]);
+	seq_printf(m, "pv_yield_events  %llu\n",
+		   stats->events[KVM_SCHED_EVT_PV_YIELD]);
+	seq_printf(m, "yield_attempts   %llu\n",
+		   stats->yield_attempts);
+	seq_printf(m, "yield_success    %llu\n",
+		   stats->yield_success);
+	seq_printf(m, "yield_miss       %llu\n",
+		   stats->yield_miss);
+	seq_printf(m, "guard_level      %d\n",
+		   stats->guard_level);
+	seq_printf(m, "guard_triggers   %llu\n",
+		   stats->guard_trigger_count);
+	seq_printf(m, "bad_windows      %u\n",
+		   stats->consecutive_bad_windows);
+	seq_printf(m, "ple_rate_ema     %lu\n",
+		   stats->ple_rate_ema);
+	seq_printf(m, "steal_time_ema   %lu\n",
+		   stats->steal_time_ema);
+	seq_printf(m, "yield_miss_ema   %lu\n",
+		   stats->yield_miss_rate_ema);
+	return 0;
+}
+
+static int sched_hint_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, sched_hint_stats_show, inode->i_private);
+}
+
+static const struct file_operations vcpu_sched_hint_fops = {
+	.owner	= THIS_MODULE,
+	.open	= sched_hint_stats_open,
+	.read	= seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 void kvm_arch_create_vcpu_debugfs(struct kvm_vcpu *vcpu, struct dentry *debugfs_dentry)
 {
 	debugfs_create_file("guest_mode", 0444, debugfs_dentry, vcpu,
@@ -76,6 +126,10 @@ void kvm_arch_create_vcpu_debugfs(struct kvm_vcpu *vcpu, struct dentry *debugfs_
 				    debugfs_dentry, vcpu,
 				    &vcpu_tsc_scaling_frac_fops);
 	}
+
+	if (vcpu->arch.sched_hint_stats)
+		debugfs_create_file("sched-hint", 0444, debugfs_dentry,
+				    vcpu, &vcpu_sched_hint_fops);
 }
 
 /*
